@@ -91,7 +91,6 @@ func getUserDetails(name string, client *http.Client) (User, []Badge) {
 	user.Id = v.GetInt("user", "id")
 	user.Name = string(v.GetStringBytes("user", "name"))
 	user.Registered = v.GetInt("user", "registered")
-	user.Score = v.GetInt("user", "score")
 
 	var badges []Badge
 	for _, value := range v.GetArray("badges") {
@@ -401,19 +400,17 @@ type User struct {
 	Id         int
 	Name       string
 	Registered int
-	Score      int
 }
 
 func insertUser(user User, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close()
 	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "MERGE (a:User {id: $id,name: $username,  registered: $registered, score: $score}) return a"
+		query := "MERGE (a:User {id: $id,name: $username,  registered: $registered}) return a"
 		result, err := tx.Run(query, map[string]interface{}{
 			"id":         user.Id,
 			"username":   user.Name,
 			"registered": user.Registered,
-			"score":      user.Score,
 		})
 		if err != nil {
 			return nil, err
