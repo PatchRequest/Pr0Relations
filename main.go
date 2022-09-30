@@ -69,7 +69,6 @@ func main() {
 		nextPosts, latestID = getNextXPosts(latestID, client)
 		elapsed := time.Since(start)
 		fmt.Printf("Time %s for %d posts\n", elapsed, len(nextPosts))
-		time.Sleep(20 * time.Second)
 	}
 }
 
