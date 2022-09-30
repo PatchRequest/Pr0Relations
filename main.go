@@ -12,11 +12,14 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v4/neo4j"
 	"github.com/valyala/fastjson"
 )
+
+var wg sync.WaitGroup
 
 func main() {
 	uri := flag.String("uri", "bolt://127.0.0.1:7687", "URL of neo4j server Default: bolt://127.0.0.1:7687")
@@ -52,20 +55,20 @@ func main() {
 	nextPosts, latestID := getNextXPosts(latestID, client)
 
 	for latestID > 2 {
-
+		start := time.Now()
 		for _, post := range nextPosts {
-			start := time.Now()
+
 			tags, comments := getTagsAndCommentsOfPost(post.Id, client)
 
 			authorData, badges := getUserDetails(post.creatorname, client)
+			wg.Add(1)
+			go registerPostInDB(driver, authorData, post, tags, comments, badges)
 
-			registerPostInDB(driver, authorData, post, tags, comments, badges)
-			elapsed := time.Since(start)
-			fmt.Printf("Time: %s for Post  %d\n", elapsed, post.Id)
 		}
-
+		wg.Wait()
 		nextPosts, latestID = getNextXPosts(latestID, client)
-
+		elapsed := time.Since(start)
+		fmt.Printf("Time %s for %d posts\n", elapsed, len(nextPosts))
 	}
 }
 
@@ -253,7 +256,7 @@ func solveCaptcha(client *http.Client) (string, string) {
 }
 
 func registerPostInDB(driver neo4j.Driver, authorData User, post Post, tags []Tag, comments []Comment, badges []Badge) {
-
+	defer wg.Done()
 	err := insertUser(authorData, driver)
 	if err != nil {
 		panic(err)
