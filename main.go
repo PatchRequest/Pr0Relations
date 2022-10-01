@@ -3,6 +3,7 @@ package main
 // docker run --name pro0neo4j -p7474:7474 -p7687:7687 -d -v $HOME/neo4j/data:/data --env NEO4J_AUTH=neo4j/neo4j neo4j:latest
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -32,7 +33,8 @@ func main() {
 	if !strings.HasPrefix(*uri, "bolt://") {
 		*uri = "bolt://" + *uri
 	}
-
+	_ = *pr0username
+	_ = *pr0password
 	fmt.Println("Connecting to neo4j server at: ", *uri, " ...")
 
 	// Connect to the database
@@ -50,50 +52,77 @@ func main() {
 	client := &http.Client{
 		Jar: jar,
 	}
-	loginUser(*pr0username, *pr0password, client)
-	/*err = setupDB(driver)
+
+	/*err = loginUser(*pr0username, *pr0password, client)
 	if err != nil {
 		panic(err)
 	}*/
+	// read cookie out of .cookie and instert into cookiejar for pr0gramm.com
+	cookie, err := ioutil.ReadFile(".cookie")
+	if err != nil {
+		panic(err)
+	}
+	cookieURL, err := url.Parse("https://pr0gramm.com")
+	if err != nil {
+		panic(err)
+	}
+	jar.SetCookies(cookieURL, []*http.Cookie{{Name: "me", Value: string(cookie)}})
+	err = setupDB(driver)
+	if err != nil {
+		panic(err)
+	}
 
 	latestID := getLatestPostID(client)
-	nextPosts, latestID := getNextXPosts(latestID, client)
+	nextPosts, latestID, err := getNextXPosts(latestID, client)
+	for err != nil {
+		fmt.Println(err)
+		time.Sleep(10 * time.Minute)
+		nextPosts, latestID, err = getNextXPosts(latestID, client)
+	}
 
 	for latestID > 2 {
 		start := time.Now()
 		for _, post := range nextPosts {
 
-			tags, comments := getTagsAndCommentsOfPost(post.Id, client)
+			tags, comments, err := getTagsAndCommentsOfPost(post.Id, client)
+			for err != nil {
+				fmt.Println(err)
+				time.Sleep(10 * time.Minute)
+				tags, comments, err = getTagsAndCommentsOfPost(post.Id, client)
+			}
 
-			authorData, badges := getUserDetails(post.creatorname, client)
+			authorData, badges, err := getUserDetails(post.creatorname, client)
+			for err != nil {
+				fmt.Println(err)
+				time.Sleep(10 * time.Minute)
+				authorData, badges, err = getUserDetails(post.creatorname, client)
+			}
+
 			wg.Add(1)
-			go registerPostInDB(driver, authorData, post, tags, comments, badges)
+			go registerPostInDB(driver, authorData, post, tags, comments, badges, client)
 
 		}
 		wg.Wait()
-		nextPosts, latestID = getNextXPosts(latestID, client)
+		nextPosts, latestID, err = getNextXPosts(latestID, client)
+		for err != nil {
+			fmt.Println(err)
+			time.Sleep(10 * time.Minute)
+			nextPosts, latestID, err = getNextXPosts(latestID, client)
+		}
 		elapsed := time.Since(start)
 		fmt.Printf("Time %s for %d posts\n", elapsed, len(nextPosts))
 	}
 }
 
-func getUserDetails(name string, client *http.Client) (User, []Badge) {
+func getUserDetails(name string, client *http.Client) (User, []Badge, error) {
 	url := "https://pr0gramm.com/api/profile/info?name=" + name + "&flags=15"
 	resp, err := client.Get(url)
-	if err != nil {
-		panic(err)
-	}
+
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		panic(err)
-	}
 
 	var p fastjson.Parser
 	v, err := p.ParseBytes(body)
-	if err != nil {
-		panic(err)
-	}
 
 	var user User
 	user.Id = v.GetInt("user", "id")
@@ -107,7 +136,7 @@ func getUserDetails(name string, client *http.Client) (User, []Badge) {
 		badge.Name = string(value.GetStringBytes("image"))
 		badges = append(badges, badge)
 	}
-	return user, badges
+	return user, badges, err
 }
 
 func getLatestPostID(client *http.Client) int {
@@ -130,22 +159,29 @@ func getLatestPostID(client *http.Client) int {
 	return v.GetInt("items", "0", "id")
 }
 
-func getNextXPosts(startID int, client *http.Client) ([]Post, int) {
+func getNextXPosts(startID int, client *http.Client) ([]Post, int, error) {
 	url := "https://pr0gramm.com/api/items/get?older=" + strconv.Itoa(startID) + "&flags=15"
 	resp, err := client.Get(url)
 	if err != nil {
-		panic(err)
+		return nil, startID, err
 	}
+
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		panic(err)
+		return nil, startID, err
 	}
+
+	if resp.StatusCode != 200 {
+		return nil, startID, errors.New(string(body))
+	}
+
 	var p fastjson.Parser
 	v, err := p.ParseBytes(body)
 	if err != nil {
-		panic(err)
+		return nil, startID, err
 	}
+
 	var posts []Post
 	// Get array of json posts
 	for _, value := range v.GetArray("items") {
@@ -164,25 +200,20 @@ func getNextXPosts(startID int, client *http.Client) ([]Post, int) {
 		posts = append(posts, post)
 
 	}
-	return posts, posts[len(posts)-1].Id
+
+	return posts, posts[len(posts)-1].Id, err
 }
 
-func getTagsAndCommentsOfPost(id int, client *http.Client) ([]Tag, []Comment) {
+func getTagsAndCommentsOfPost(id int, client *http.Client) ([]Tag, []Comment, error) {
 	url := "https://pr0gramm.com/api/items/info?itemId=" + strconv.Itoa(id)
 	resp, err := client.Get(url)
-	if err != nil {
-		panic(err)
-	}
+
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		panic(err)
-	}
+
 	var p fastjson.Parser
 	v, err := p.ParseBytes(body)
-	if err != nil {
-		panic(err)
-	}
+
 	var tags []Tag
 	var comments []Comment
 	// Get array of json tags
@@ -201,12 +232,13 @@ func getTagsAndCommentsOfPost(id int, client *http.Client) ([]Tag, []Comment) {
 		comment.Created = value.GetInt("created")
 		comment.Content = string(value.GetStringBytes("content"))
 		comment.parentId = value.GetInt("parent")
+		comment.Name = string(value.GetStringBytes("name"))
 		comments = append(comments, comment)
 	}
-	return tags, comments
+	return tags, comments, err
 }
 
-func loginUser(username string, password string, client *http.Client) {
+func loginUser(username string, password string, client *http.Client) error {
 	token, captchaSolution := solveCaptcha(client)
 
 	data := url.Values{
@@ -228,10 +260,12 @@ func loginUser(username string, password string, client *http.Client) {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(string(body))
+	if resp.StatusCode != 200 {
+		return errors.New(string(body))
+	}
 
 	client.Jar.SetCookies(resp.Request.URL, resp.Cookies())
-	return
+	return nil
 
 }
 
@@ -262,7 +296,7 @@ func solveCaptcha(client *http.Client) (string, string) {
 	return string(v.GetStringBytes("token")), text
 }
 
-func registerPostInDB(driver neo4j.Driver, authorData User, post Post, tags []Tag, comments []Comment, badges []Badge) {
+func registerPostInDB(driver neo4j.Driver, authorData User, post Post, tags []Tag, comments []Comment, badges []Badge, client *http.Client) {
 	defer wg.Done()
 	err := insertUser(authorData, driver)
 	if err != nil {
@@ -308,20 +342,26 @@ func registerPostInDB(driver neo4j.Driver, authorData User, post Post, tags []Ta
 	}
 
 	for _, comment := range comments {
-		err = connectCommentToUser(comment, authorData, driver)
+		// Get user data of comment author
+		comentAuthorId, err := getUserIdByNameFromDB(comment.Name, driver, client)
+		if err != nil {
+			panic(err)
+		}
+
+		err = connectCommentToUser(comment, comentAuthorId, driver)
 		if err != nil {
 			panic(err)
 		}
 		for _, comment2 := range comments {
 
 			if comment.parentId == comment2.ID {
-				err = connectCommentToComment(comment, comment2, driver)
+				err = connectCommentToComment(comment2, comment, driver)
 				if err != nil {
 					panic(err)
 				}
 			}
 			if comment.ID == comment2.parentId {
-				err = connectCommentToComment(comment2, comment, driver)
+				err = connectCommentToComment(comment, comment2, driver)
 				if err != nil {
 					panic(err)
 				}
@@ -333,10 +373,69 @@ func registerPostInDB(driver neo4j.Driver, authorData User, post Post, tags []Ta
 
 }
 
+func getUserIdByNameFromDB(username string, driver neo4j.Driver, client *http.Client) (int, error) {
+	//fmt.Println("Searching for user " + username)
+	var userId int
+	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close()
+	result, err := session.Run("MATCH (u:User) WHERE u.name = $username RETURN u", map[string]interface{}{"username": username})
+	if err != nil {
+		return 0, err
+	}
+	// check if results is empty
+	if !result.Next() {
+		userData, badges, err := getUserDetails(username, client)
+		if err != nil {
+			return 0, err
+		}
+		err = insertUser(userData, driver)
+		if err != nil {
+			return 0, err
+		}
+		for _, badge := range badges {
+			err = insertBadge(badge, driver)
+			if err != nil {
+				return 0, err
+			}
+			err = connectBadgeToUser(badge, userData, driver)
+			if err != nil {
+				return 0, err
+			}
+
+		}
+		userId = userData.Id
+
+	} else {
+		record := result.Record()
+		userAsNode := record.GetByIndex(0).(neo4j.Node)
+		userId = int(userAsNode.Props["pr0id"].(int64))
+	}
+
+	return userId, nil
+}
+
 func setupDB(driver neo4j.Driver) error {
+
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close()
+
 	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
+		query := "CALL db.constraints()"
+		result, err := tx.Run(query, map[string]interface{}{})
+		if err != nil {
+			return nil, err
+		}
+		result.Next()
+		if result.Record() != nil {
+			return nil, errors.New("aleady exists")
+		}
+		return nil, err
+	})
+	if err != nil {
+		fmt.Println("DB Already setup")
+		return nil
+	}
+	_, err = session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
 		query := "CREATE CONSTRAINT FOR (n:Tag) REQUIRE n.name IS UNIQUE"
 		result, err := tx.Run(query, map[string]interface{}{})
 		if err != nil {
@@ -405,6 +504,12 @@ func insertTag(tag Tag, driver neo4j.Driver) error {
 		result.Consume()
 		return nil, err
 	})
+	if err != nil {
+
+		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
+			return nil
+		}
+	}
 	return err
 }
 
@@ -426,6 +531,12 @@ func insertBadge(badge Badge, driver neo4j.Driver) error {
 		result.Consume()
 		return nil, err
 	})
+	if err != nil {
+
+		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
+			return nil
+		}
+	}
 	return err
 }
 
@@ -436,6 +547,7 @@ type Comment struct {
 	Created  int
 	Content  string
 	parentId int
+	Name     string
 }
 
 func insertComment(comment Comment, driver neo4j.Driver) error {
@@ -450,12 +562,16 @@ func insertComment(comment Comment, driver neo4j.Driver) error {
 			"created": comment.Created,
 			"content": comment.Content,
 		})
-		if err != nil {
-			return nil, err
-		}
 		result.Consume()
+
 		return nil, err
 	})
+	if err != nil {
+
+		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
+			return nil
+		}
+	}
 	return err
 }
 
@@ -470,19 +586,24 @@ func insertUser(user User, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close()
 	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "MERGE (a:User {pr0id: $id,name: $username,  registered: $registered, score: $score}) ON MATCH SET a.score = $score  return a"
+		query := "MERGE (a:User {pr0id: $id,name: $username,  registered: $registered, score: $score}) ON MATCH SET a.score = $score, a.name = $username, a.registered = $registered, a.pr0id = $id  return a"
 		result, err := tx.Run(query, map[string]interface{}{
 			"id":         user.Id,
 			"username":   user.Name,
 			"registered": user.Registered,
 			"score":      user.Score,
 		})
-		if err != nil {
-			return nil, err
-		}
 		result.Consume()
+
 		return nil, err
 	})
+	if err != nil {
+
+		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
+			return nil
+		}
+	}
+
 	return err
 }
 
@@ -522,6 +643,12 @@ func insertPost(post Post, driver neo4j.Driver) error {
 		result.Consume()
 		return nil, err
 	})
+	if err != nil {
+
+		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
+			return nil
+		}
+	}
 	return err
 }
 
@@ -540,6 +667,12 @@ func connectBadgeToUser(badge Badge, user User, driver neo4j.Driver) error {
 		result.Consume()
 		return nil, err
 	})
+	if err != nil {
+
+		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
+			return nil
+		}
+	}
 	return err
 }
 func connectTagToPost(tag Tag, post Post, driver neo4j.Driver) error {
@@ -557,6 +690,12 @@ func connectTagToPost(tag Tag, post Post, driver neo4j.Driver) error {
 		result.Consume()
 		return nil, err
 	})
+	if err != nil {
+
+		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
+			return nil
+		}
+	}
 	return err
 }
 func connectCommentToPost(comment Comment, post Post, driver neo4j.Driver) error {
@@ -574,15 +713,21 @@ func connectCommentToPost(comment Comment, post Post, driver neo4j.Driver) error
 		result.Consume()
 		return nil, err
 	})
+	if err != nil {
+
+		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
+			return nil
+		}
+	}
 	return err
 }
-func connectCommentToUser(comment Comment, user User, driver neo4j.Driver) error {
+func connectCommentToUser(comment Comment, userId int, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close()
 	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
 		query := "MATCH (u:User {pr0id: $userId}), (b:Comment {pr0id: $id}) MERGE (u)-[a:MadeComment]->(b) return a,b,u"
 		result, err := tx.Run(query, map[string]interface{}{
-			"userId": user.Id,
+			"userId": userId,
 			"id":     comment.ID,
 		})
 		if err != nil {
@@ -591,6 +736,12 @@ func connectCommentToUser(comment Comment, user User, driver neo4j.Driver) error
 		result.Consume()
 		return nil, err
 	})
+	if err != nil {
+
+		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
+			return nil
+		}
+	}
 	return err
 }
 func connectCommentToComment(comment1 Comment, comment2 Comment, driver neo4j.Driver) error {
@@ -608,5 +759,11 @@ func connectCommentToComment(comment1 Comment, comment2 Comment, driver neo4j.Dr
 		result.Consume()
 		return nil, err
 	})
+	if err != nil {
+
+		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
+			return nil
+		}
+	}
 	return err
 }
