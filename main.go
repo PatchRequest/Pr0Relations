@@ -51,10 +51,10 @@ func main() {
 		Jar: jar,
 	}
 	loginUser(*pr0username, *pr0password, client)
-	err = setupDB(driver)
+	/*err = setupDB(driver)
 	if err != nil {
 		panic(err)
-	}
+	}*/
 
 	latestID := getLatestPostID(client)
 	nextPosts, latestID := getNextXPosts(latestID, client)
