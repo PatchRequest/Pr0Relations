@@ -27,14 +27,12 @@ func main() {
 	username := flag.String("username", "neo4j", "Username for neo4j server Default: neo4j")
 	password := flag.String("password", "test", "Password for neo4j server Default: test")
 
-	pr0username := flag.String("pr0username", "", "Username for Pr0Gramm")
-	pr0password := flag.String("pr0password", "", "Password for Pr0Gramm")
+	mode := flag.String("mode", "online", "start at online first or offline (db) first")
 	flag.Parse()
 	if !strings.HasPrefix(*uri, "bolt://") {
 		*uri = "bolt://" + *uri
 	}
-	_ = *pr0username
-	_ = *pr0password
+
 	fmt.Println("Connecting to neo4j server at: ", *uri, " ...")
 
 	// Connect to the database
@@ -67,12 +65,19 @@ func main() {
 		panic(err)
 	}
 	jar.SetCookies(cookieURL, []*http.Cookie{{Name: "me", Value: string(cookie)}})
-	err = setupDB(driver)
-	if err != nil {
-		panic(err)
+	setupDB(driver)
+	var latestID int
+	if *mode == "online" {
+		latestID = getLatestPostID(client)
+		fmt.Println("Starting online with: ", latestID)
+	} else {
+		latestID, err = getlatestPostIDFromDB(driver)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Println("Starting offline with: ", latestID)
 	}
 
-	latestID := getLatestPostID(client)
 	nextPosts, latestID, err := getNextXPosts(latestID, client)
 	for err != nil {
 		fmt.Println(err)
@@ -110,7 +115,8 @@ func main() {
 			nextPosts, latestID, err = getNextXPosts(latestID, client)
 		}
 		elapsed := time.Since(start)
-		fmt.Printf("Time %s for %d posts\n", elapsed, len(nextPosts))
+		dt := time.Now()
+		fmt.Printf("[%s] Time %s for %d posts\n", dt.String(), elapsed, len(nextPosts))
 	}
 }
 
@@ -306,6 +312,11 @@ func registerPostInDB(driver neo4j.Driver, authorData User, post Post, tags []Ta
 	if err != nil {
 		panic(err)
 	}
+	err = connectPostToUser(post, authorData, driver)
+	if err != nil {
+		panic(err)
+	}
+
 	for _, tag := range tags {
 
 		err = insertTag(tag, driver)
@@ -372,6 +383,24 @@ func registerPostInDB(driver neo4j.Driver, authorData User, post Post, tags []Ta
 	}
 
 }
+func getlatestPostIDFromDB(driver neo4j.Driver) (int, error) {
+	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close()
+
+	result, err := session.Run("MATCH (p:Post) RETURN p ORDER BY p.pr0id ASC LIMIT 1", nil)
+	if err != nil {
+		return 0, err
+	}
+	var latestPostID int
+
+	if result.Next() {
+		record := result.Record()
+		postAsNode := record.GetByIndex(0).(neo4j.Node)
+		latestPostID = int(postAsNode.Props["pr0id"].(int64))
+
+	}
+	return latestPostID, nil
+}
 
 func getUserIdByNameFromDB(username string, driver neo4j.Driver, client *http.Client) (int, error) {
 	//fmt.Println("Searching for user " + username)
@@ -414,74 +443,46 @@ func getUserIdByNameFromDB(username string, driver neo4j.Driver, client *http.Cl
 	return userId, nil
 }
 
-func setupDB(driver neo4j.Driver) error {
+func setupDB(driver neo4j.Driver) {
 
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close()
-
-	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "CALL db.constraints()"
-		result, err := tx.Run(query, map[string]interface{}{})
-		if err != nil {
-			return nil, err
-		}
-		result.Next()
-		if result.Record() != nil {
-			return nil, errors.New("aleady exists")
-		}
-		return nil, err
-	})
+	query := "CALL db.constraints()"
+	_, err := session.Run(query, map[string]interface{}{})
 	if err != nil {
-		fmt.Println("DB Already setup")
-		return nil
-	}
-	_, err = session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "CREATE CONSTRAINT FOR (n:Tag) REQUIRE n.name IS UNIQUE"
-		result, err := tx.Run(query, map[string]interface{}{})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
-	})
-	_, err = session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "CREATE CONSTRAINT FOR (n:Badge) REQUIRE n.name IS UNIQUE"
-		result, err := tx.Run(query, map[string]interface{}{})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
-	})
-	_, err = session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "CREATE CONSTRAINT FOR (n:Comment) REQUIRE n.pr0id IS UNIQUE"
-		result, err := tx.Run(query, map[string]interface{}{})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
-	})
+		fmt.Println("DB already setup")
 
-	_, err = session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "CREATE CONSTRAINT FOR (n:User) REQUIRE n.pr0id IS UNIQUE"
-		result, err := tx.Run(query, map[string]interface{}{})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
-	})
-	_, err = session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "CREATE CONSTRAINT FOR (n:Post) REQUIRE n.pr0id IS UNIQUE"
-		result, err := tx.Run(query, map[string]interface{}{})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
-	})
-	return err
+	}
+	query = "CREATE CONSTRAINT FOR (n:Tag) REQUIRE n.name IS UNIQUE"
+	_, err = session.Run(query, map[string]interface{}{})
+	if err != nil {
+		fmt.Println("DB already setup")
+
+	}
+	query = "CREATE CONSTRAINT FOR (n:Badge) REQUIRE n.name IS UNIQUE"
+	_, err = session.Run(query, map[string]interface{}{})
+	if err != nil {
+		fmt.Println("DB already setup")
+
+	}
+	query = "CREATE CONSTRAINT FOR (n:Comment) REQUIRE n.pr0id IS UNIQUE"
+	_, err = session.Run(query, map[string]interface{}{})
+	if err != nil {
+		fmt.Println("DB already setup")
+
+	}
+	query = "CREATE CONSTRAINT FOR (n:User) REQUIRE n.pr0id IS UNIQUE"
+	_, err = session.Run(query, map[string]interface{}{})
+	if err != nil {
+		fmt.Println("DB already setup")
+
+	}
+	query = "CREATE CONSTRAINT FOR (n:Post) REQUIRE n.pr0id IS UNIQUE"
+	_, err = session.Run(query, map[string]interface{}{})
+	if err != nil {
+		fmt.Println("DB already setup")
+
+	}
 
 }
 
@@ -492,24 +493,19 @@ type Tag struct {
 
 func insertTag(tag Tag, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	query := "MERGE (a:Tag { name: $name }) return a"
 	defer session.Close()
-	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "MERGE (a:Tag { name: $name }) return a"
-		result, err := tx.Run(query, map[string]interface{}{
-			"name": tag.Name,
-		})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
+	result, err := session.Run(query, map[string]interface{}{
+		"name": tag.Name,
 	})
-	if err != nil {
 
+	if err != nil {
 		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
 			return nil
 		}
+		return err
 	}
+	result.Consume()
 	return err
 }
 
@@ -519,24 +515,19 @@ type Badge struct {
 
 func insertBadge(badge Badge, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	query := "MERGE (a:Badge { name: $name }) return a"
 	defer session.Close()
-	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "MERGE (a:Badge { name: $name }) return a"
-		result, err := tx.Run(query, map[string]interface{}{
-			"name": badge.Name,
-		})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
+	result, err := session.Run(query, map[string]interface{}{
+		"name": badge.Name,
 	})
-	if err != nil {
 
+	if err != nil {
 		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
 			return nil
 		}
+		return err
 	}
+	result.Consume()
 	return err
 }
 
@@ -552,26 +543,23 @@ type Comment struct {
 
 func insertComment(comment Comment, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	query := "MERGE (a:Comment { pr0id: $id, up: $up, down: $down, created: $created, content: $content }) ON MATCH SET a.up = $up, a.down = $down return a"
 	defer session.Close()
-	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "MERGE (a:Comment { pr0id: $id, up: $up, down: $down, created: $created, content: $content }) ON MATCH SET a.up = $up, a.down = $down return a"
-		result, err := tx.Run(query, map[string]interface{}{
-			"id":      comment.ID,
-			"up":      comment.Up,
-			"down":    comment.Down,
-			"created": comment.Created,
-			"content": comment.Content,
-		})
-		result.Consume()
-
-		return nil, err
+	result, err := session.Run(query, map[string]interface{}{
+		"id":      comment.ID,
+		"up":      comment.Up,
+		"down":    comment.Down,
+		"created": comment.Created,
+		"content": comment.Content,
 	})
-	if err != nil {
 
+	if err != nil {
 		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
 			return nil
 		}
+		return err
 	}
+	result.Consume()
 	return err
 }
 
@@ -584,26 +572,22 @@ type User struct {
 
 func insertUser(user User, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	query := "MERGE (a:User {pr0id: $id,name: $username,  registered: $registered, score: $score}) ON MATCH SET a.score = $score, a.name = $username, a.registered = $registered, a.pr0id = $id  return a"
 	defer session.Close()
-	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "MERGE (a:User {pr0id: $id,name: $username,  registered: $registered, score: $score}) ON MATCH SET a.score = $score, a.name = $username, a.registered = $registered, a.pr0id = $id  return a"
-		result, err := tx.Run(query, map[string]interface{}{
-			"id":         user.Id,
-			"username":   user.Name,
-			"registered": user.Registered,
-			"score":      user.Score,
-		})
-		result.Consume()
-
-		return nil, err
+	result, err := session.Run(query, map[string]interface{}{
+		"id":         user.Id,
+		"username":   user.Name,
+		"registered": user.Registered,
+		"score":      user.Score,
 	})
-	if err != nil {
 
+	if err != nil {
 		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
 			return nil
 		}
+		return err
 	}
-
+	result.Consume()
 	return err
 }
 
@@ -624,146 +608,140 @@ type Post struct {
 func insertPost(post Post, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close()
-	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "MERGE (a:Post { pr0id: $id, up: $up, down: $down, created: $created, width: $width, height: $height, audio: $audio, flags: $flags, url: $Url }) ON MATCH SET a.up = $up, a.down = $down return a"
-		result, err := tx.Run(query, map[string]interface{}{
-			"id":      post.Id,
-			"up":      post.Up,
-			"down":    post.Down,
-			"created": post.Created,
-			"width":   post.Width,
-			"height":  post.Height,
-			"audio":   post.Audio,
-			"flags":   post.Flags,
-			"Url":     post.Url,
-		})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
+	query := "MERGE (a:Post { pr0id: $id, up: $up, down: $down, created: $created, width: $width, height: $height, audio: $audio, flags: $flags, url: $Url }) ON MATCH SET a.up = $up, a.down = $down return a"
+	result, err := session.Run(query, map[string]interface{}{
+		"id":      post.Id,
+		"up":      post.Up,
+		"down":    post.Down,
+		"created": post.Created,
+		"width":   post.Width,
+		"height":  post.Height,
+		"audio":   post.Audio,
+		"flags":   post.Flags,
+		"Url":     post.Url,
 	})
-	if err != nil {
 
+	if err != nil {
 		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
 			return nil
 		}
+		return err
 	}
+	result.Consume()
 	return err
 }
 
 func connectBadgeToUser(badge Badge, user User, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	query := "MATCH (u:User {pr0id: $userId}), (b:Badge {name: $name}) MERGE (u)-[c:OwnsBadge]->(b) return u,b,c"
 	defer session.Close()
-	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "MATCH (u:User {pr0id: $userId}), (b:Badge {name: $name}) MERGE (u)-[c:OwnsBadge]->(b) return u,b,c"
-		result, err := tx.Run(query, map[string]interface{}{
-			"userId": user.Id,
-			"name":   badge.Name,
-		})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
+	result, err := session.Run(query, map[string]interface{}{
+		"userId": user.Id,
+		"name":   badge.Name,
 	})
-	if err != nil {
 
+	if err != nil {
 		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
 			return nil
 		}
+		return err
 	}
+	result.Consume()
 	return err
 }
 func connectTagToPost(tag Tag, post Post, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	query := "MATCH (p:Post {pr0id: $postId}), (t:Tag {name: $name}) MERGE (p)-[c:HasTag]->(t) return p,t,c"
 	defer session.Close()
-	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "MATCH (p:Post {pr0id: $postId}), (t:Tag {name: $name}) MERGE (p)-[c:HasTag]->(t) return p,t,c"
-		result, err := tx.Run(query, map[string]interface{}{
-			"postId": post.Id,
-			"name":   tag.Name,
-		})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
+	result, err := session.Run(query, map[string]interface{}{
+		"postId": post.Id,
+		"name":   tag.Name,
 	})
-	if err != nil {
 
+	if err != nil {
 		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
 			return nil
 		}
+		return err
 	}
+	result.Consume()
 	return err
 }
 func connectCommentToPost(comment Comment, post Post, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	query := "MATCH (p:Post {pr0id: $postId}), (b:Comment {pr0id: $id}) MERGE (p)-[c:HasComment]->(b) return p,b,c"
 	defer session.Close()
-	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "MATCH (p:Post {pr0id: $postId}), (b:Comment {pr0id: $id}) MERGE (p)-[c:HasComment]->(b) return p,b,c"
-		result, err := tx.Run(query, map[string]interface{}{
-			"postId": post.Id,
-			"id":     comment.ID,
-		})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
+	result, err := session.Run(query, map[string]interface{}{
+		"postId": post.Id,
+		"id":     comment.ID,
 	})
-	if err != nil {
 
+	if err != nil {
 		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
 			return nil
 		}
+		return err
 	}
+	result.Consume()
 	return err
 }
 func connectCommentToUser(comment Comment, userId int, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	query := "MATCH (u:User {pr0id: $userId}), (b:Comment {pr0id: $id}) MERGE (u)-[a:MadeComment]->(b) return a,b,u"
 	defer session.Close()
-	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "MATCH (u:User {pr0id: $userId}), (b:Comment {pr0id: $id}) MERGE (u)-[a:MadeComment]->(b) return a,b,u"
-		result, err := tx.Run(query, map[string]interface{}{
-			"userId": userId,
-			"id":     comment.ID,
-		})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
+	result, err := session.Run(query, map[string]interface{}{
+		"userId": userId,
+		"id":     comment.ID,
 	})
-	if err != nil {
 
+	if err != nil {
 		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
 			return nil
 		}
+		return err
 	}
+	result.Consume()
 	return err
+
 }
 func connectCommentToComment(comment1 Comment, comment2 Comment, driver neo4j.Driver) error {
 	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	query := "MATCH (c1:Comment {pr0id: $id1}), (c2:Comment {pr0id: $id2}) MERGE (c1)-[a:IsParentFor]->(c2) return a,c1,c2"
 	defer session.Close()
-	_, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		query := "MATCH (c1:Comment {pr0id: $id1}), (c2:Comment {pr0id: $id2}) MERGE (c1)-[a:IsParentFor]->(c2) return a,c1,c2"
-		result, err := tx.Run(query, map[string]interface{}{
-			"id1": comment1.ID,
-			"id2": comment2.ID,
-		})
-		if err != nil {
-			return nil, err
-		}
-		result.Consume()
-		return nil, err
-	})
-	if err != nil {
 
+	result, err := session.Run(query, map[string]interface{}{
+		"id1": comment1.ID,
+		"id2": comment2.ID,
+	})
+
+	if err != nil {
 		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
 			return nil
 		}
+		return err
 	}
+	result.Consume()
 	return err
+
+}
+
+func connectPostToUser(post Post, user User, driver neo4j.Driver) error {
+	session := driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	query := "MATCH (u:User {pr0id: $userId}), (p:Post {pr0id: $id}) MERGE (u)-[a:MadePost]->(p) return a,p,u"
+	defer session.Close()
+
+	result, err := session.Run(query, map[string]interface{}{
+		"userId": user.Id,
+		"id":     post.Id,
+	})
+
+	if err != nil {
+		if strings.Contains(err.Error(), "Neo.ClientError.Schema.ConstraintValidationFailed") {
+			return nil
+		}
+		return err
+	}
+	result.Consume()
+	return err
+
 }
