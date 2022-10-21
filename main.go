@@ -116,7 +116,8 @@ func main() {
 		}
 		elapsed := time.Since(start)
 		dt := time.Now()
-		fmt.Printf("[%s] Time %s for %d posts\n", dt.String(), elapsed, len(nextPosts))
+		timeFormat := "02.01.2001 15:04"
+		fmt.Printf("\r[%s] [Time: %s] [Amount: %d] [ID: %d] [Created: %s]", dt.Format(timeFormat), elapsed, len(nextPosts), latestID, time.Unix(int64(nextPosts[0].Created), 0).Format(timeFormat))
 	}
 }
 
